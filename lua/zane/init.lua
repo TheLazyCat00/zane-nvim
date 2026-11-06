@@ -40,13 +40,15 @@ local function register()
 end
 
 -- The query passes the grammar's binders and the node types that can hold one
--- as space-separated arguments; each distinct string is split once.
+-- as space-separated arguments; each distinct string is split once. A query
+-- without them (one left over from a manual install) matches nothing.
 local sets = {}
 local function set(words)
+  words = words or ""
   local result = sets[words]
   if not result then
     result = {}
-    for word in (words or ""):gmatch("%S+") do
+    for word in words:gmatch("%S+") do
       result[word] = true
     end
     sets[words] = result

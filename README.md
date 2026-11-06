@@ -18,9 +18,10 @@ parser and its queries always come from the same compiler version.
 
 - Neovim 0.11 or newer
 - nvim-treesitter, `main` branch
-- the [Tree-sitter CLI](https://github.com/tree-sitter/tree-sitter/tree/master/crates/cli),
-  a C compiler, `curl` and `tar`, which nvim-treesitter uses to install
-  parsers. Node is not needed.
+- the [Tree-sitter CLI](https://github.com/tree-sitter/tree-sitter/tree/master/crates/cli)
+  0.26.1 or newer (nvim-treesitter's minimum), a C compiler, `curl` and `tar`,
+  which nvim-treesitter uses to install parsers. Node is not needed: the CLI
+  generates the parser with its built-in JavaScript runtime.
 
 ## Install
 
@@ -41,6 +42,14 @@ give to `require("nvim-treesitter").install()`: nvim-treesitter may read that
 list before this plugin has registered the parser. `:TSUpdate` (or
 `:TSUpdate zane`) fetches the compiler's current grammar and queries again;
 restart Neovim afterwards, since a loaded parser is not replaced.
+
+### Moving from a manual install
+
+Remove what the compiler's old instructions had you copy or load, since it
+would run alongside the plugin: `zane.lua` (in `plugin/`, or loaded with
+`dofile`), `after/queries/zane/highlights.scm`, and `parser/zane.so` and
+`queries/zane/` under `~/.config/nvim`. Also remove any `parsers.zane`
+registration of your own from an nvim-treesitter `TSUpdate` autocommand.
 
 ## Options
 
