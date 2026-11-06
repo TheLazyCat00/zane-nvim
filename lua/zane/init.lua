@@ -1,84 +1,69 @@
 -- Zane support for Neovim: filetype detection, Tree-sitter highlighting, the
 -- `zane-bound?` query predicate, and the parser's registration with
--- nvim-treesitter, which builds it. See editors/neovim/README.md.
-local grammar = require("zane.grammar")
-
+-- nvim-treesitter, which downloads the grammar and queries from
+-- zane-lang/compiler and builds the parser.
 local M = {}
 
--- editors/neovim, from this file's path (editors/neovim/lua/zane/init.lua).
-local plugin_dir = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
--- The generated Tree-sitter grammar: inside the plugin in the standalone
--- repository (.github/scripts/assemble-neovim-plugin), beside it in the compiler's.
-M.grammar_dir = vim.fs.joinpath(plugin_dir, "tree-sitter-zane")
-if not vim.uv.fs_stat(M.grammar_dir) then
-  M.grammar_dir = vim.fs.joinpath(vim.fs.dirname(plugin_dir), "tree-sitter-zane")
-end
+M.config = {
+  -- Install the parser through nvim-treesitter the first time a Zane file is
+  -- opened without one.
+  auto_install = true,
+}
+
+-- Where nvim-treesitter gets the parser and the queries Neovim reads.
+M.install_info = {
+  url = "https://github.com/zane-lang/compiler",
+  location = "editors/tree-sitter-zane",
+  generate = true,
+  generate_from_json = false,
+  queries = "editors/neovim/queries",
+}
 
 local configured = false
+local installing = false
 local notified = {}
 
-local function notify_once(key, message)
+local function notify_once(key, message, level)
   if not notified[key] then
     notified[key] = true
-    vim.notify(message, vim.log.levels.WARN, { title = "zane" })
+    vim.notify(message, level or vim.log.levels.WARN, { title = "zane" })
   end
 end
 
--- The parser's revision: a hash of the grammar it is generated from. nvim-treesitter
--- rebuilds on `:TSUpdate` when the revision it installed differs.
-function M.revision()
-  local file = io.open(vim.fs.joinpath(M.grammar_dir, "grammar.js"), "rb")
-  if not file then
-    return nil
-  end
-  local text = file:read("*a")
-  file:close()
-  return vim.fn.sha256(text):sub(1, 16)
-end
-
--- The revision nvim-treesitter last installed, or nil if it never built one.
-function M.installed_revision()
-  local ok, config = pcall(require, "nvim-treesitter.config")
-  if not ok or not config.get_install_dir then
-    return nil
-  end
-  local file = io.open(vim.fs.joinpath(config.get_install_dir("parser-info"), "zane.revision"), "r")
-  if not file then
-    return nil
-  end
-  local revision = file:read("*l")
-  file:close()
-  return revision
-end
-
--- Registers the parser with nvim-treesitter (`main` branch). It is built from
--- this checkout, so the parser always matches the plugin's queries, and the
--- queries are linked rather than copied.
+-- Registers the parser with nvim-treesitter (`main` branch), which fires
+-- `User TSUpdate` before it reads its parser table.
 local function register()
   local ok, parsers = pcall(require, "nvim-treesitter.parsers")
-  if not ok then
-    return
+  if ok then
+    parsers.zane = { install_info = vim.deepcopy(M.install_info) }
   end
-  parsers.zane = {
-    install_info = {
-      path = M.grammar_dir,
-      generate = true,
-      generate_from_json = false,
-      queries = "queries",
-      revision = M.revision(),
-    },
-  }
 end
 
--- (#zane-bound? @name) holds when a binder of the captured name is a child of
--- one of the name's ancestors. Zane forbids a local from shadowing a parameter
--- (docs/design/semantics.md D14), so that binder is the one the name refers to.
+-- The query passes the grammar's binders and the node types that can hold one
+-- as space-separated arguments; each distinct string is split once.
+local sets = {}
+local function set(words)
+  local result = sets[words]
+  if not result then
+    result = {}
+    for word in (words or ""):gmatch("%S+") do
+      result[word] = true
+    end
+    sets[words] = result
+  end
+  return result
+end
+
+-- (#zane-bound? @name "binders" "containers") holds when a binder of the
+-- captured name is a child of one of the name's ancestors. Zane forbids a
+-- local from shadowing a parameter, so that binder is the one the name refers
+-- to.
 --
 -- The walk goes down from the root rather than up from the name: finding a
 -- node's parent searches from the root each time, and a binder's siblings are
 -- only scanned in a container, never in a long statement list.
 local function bound(match, _, source, predicate)
-  local binders, containers = grammar.binders, grammar.containers
+  local binders, containers = set(predicate[3]), set(predicate[4])
   for _, node in ipairs(match[predicate[2]] or {}) do
     local name = vim.treesitter.get_node_text(node, source)
     local found = false
@@ -102,35 +87,68 @@ local function bound(match, _, source, predicate)
   return true
 end
 
--- Starts highlighting unless something else already did, and says what to
--- run when the parser is missing or older than the grammar.
-local function attach(buf)
-  if not vim.treesitter.highlighter.active[buf] and not pcall(vim.treesitter.start, buf, "zane") then
-    notify_once("missing", "No Zane parser is installed. Run :TSInstall zane (nvim-treesitter).")
+local function start(buf)
+  return vim.treesitter.highlighter.active[buf] ~= nil or pcall(vim.treesitter.start, buf, "zane")
+end
+
+-- Installs the parser through nvim-treesitter, then starts highlighting in
+-- every open Zane buffer.
+function M.install()
+  local ok, ts = pcall(require, "nvim-treesitter")
+  if not ok or not ts.install then
+    notify_once("no-ts", "Installing the Zane parser needs nvim-treesitter (main branch).", vim.log.levels.ERROR)
     return
   end
-  local installed = M.installed_revision()
-  if installed and installed ~= M.revision() then
-    notify_once("stale", "The Zane parser was built from an older grammar. Run :TSUpdate zane, then restart Neovim.")
+  if installing then
+    return
+  end
+  installing = true
+  vim.notify("Installing the Zane parser...", vim.log.levels.INFO, { title = "zane" })
+  ts.install({ "zane" }):await(function(err, done)
+    vim.schedule(function()
+      installing = false
+      if err or not done then
+        local reason = err and (": " .. tostring(err)) or "; see :TSLog"
+        vim.notify("Installing the Zane parser failed" .. reason, vim.log.levels.ERROR, { title = "zane" })
+        return
+      end
+      -- Neovim leaves a directory that did not exist at startup off
+      -- 'runtimepath', and nvim-treesitter's install directory may be new.
+      local dir = vim.fs.dirname(require("nvim-treesitter.config").get_install_dir("parser"))
+      if not vim.tbl_contains(vim.opt.runtimepath:get(), dir) then
+        vim.opt.runtimepath:prepend(dir)
+      end
+      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == "zane" then
+          start(buf)
+        end
+      end
+    end)
+  end)
+end
+
+local function attach(buf)
+  if start(buf) then
+    return
+  end
+  if M.config.auto_install then
+    M.install()
+  else
+    notify_once("missing", "No Zane parser is installed. Run :TSInstall zane.")
   end
 end
 
-function M.setup()
+function M.setup(opts)
+  M.config = vim.tbl_extend("force", M.config, opts or {})
   if configured then
     return
   end
   configured = true
 
-  local extensions = {}
-  for _, extension in ipairs(grammar.extensions) do
-    extensions[extension] = "zane"
-  end
-  vim.filetype.add({ extension = extensions })
-
+  vim.filetype.add({ extension = { zn = "zane", zane = "zane" } })
   vim.treesitter.query.add_predicate("zane-bound?", bound, { force = true })
 
   local group = vim.api.nvim_create_augroup("zane", { clear = true })
-  -- nvim-treesitter fires this before it reads its parser table.
   vim.api.nvim_create_autocmd("User", { group = group, pattern = "TSUpdate", callback = register })
   vim.api.nvim_create_autocmd("FileType", {
     group = group,

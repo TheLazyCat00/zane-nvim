@@ -3,7 +3,6 @@ local M = {}
 
 function M.check()
   local health = vim.health
-  local zane = require("zane")
   health.start("zane")
 
   if vim.fn.has("nvim-0.11") == 1 then
@@ -13,45 +12,34 @@ function M.check()
   end
 
   if pcall(require, "nvim-treesitter.config") then
-    health.ok("nvim-treesitter (main branch) builds the parser")
+    health.ok("nvim-treesitter (main branch) installs the parser")
   else
-    health.warn("nvim-treesitter (main branch) not found", {
-      "Install it to build the parser with :TSInstall zane, or build zane.so by hand (grammar/README.md).",
-    })
+    health.error("nvim-treesitter (main branch) not found", { "It downloads, builds and installs the Zane parser." })
   end
 
-  local cli = vim.fn.exepath("tree-sitter")
-  if cli ~= "" then
-    health.ok("tree-sitter CLI: " .. cli)
-  else
-    health.warn("tree-sitter CLI not on PATH", { "nvim-treesitter needs it to generate the Zane parser." })
-  end
-
-  if vim.uv.fs_stat(vim.fs.joinpath(zane.grammar_dir, "grammar.js")) then
-    health.ok("grammar: " .. zane.grammar_dir)
-  else
-    health.error("grammar.js not found in " .. zane.grammar_dir)
+  for _, tool in ipairs({ "tree-sitter", "curl", "tar" }) do
+    local path = vim.fn.exepath(tool)
+    if path ~= "" then
+      health.ok(tool .. ": " .. path)
+    else
+      health.warn(tool .. " not on PATH", { "nvim-treesitter needs it to install the Zane parser." })
+    end
   end
 
   local ok, loaded = pcall(vim.treesitter.language.add, "zane")
   if not ok or not loaded then
-    health.error("no Zane parser on 'runtimepath'", { "Run :TSInstall zane." })
+    health.error("no Zane parser installed", { "Open a .zn file, or run :TSInstall zane." })
     return
   end
   health.ok("Zane parser loads")
-
-  local installed = zane.installed_revision()
-  if installed and installed ~= zane.revision() then
-    health.warn("the parser was built from an older grammar", { "Run :TSUpdate zane, then restart Neovim." })
-  elseif installed then
-    health.ok("the parser matches the grammar")
-  end
 
   local found, query = pcall(vim.treesitter.query.get, "zane", "highlights")
   if found and query then
     health.ok("highlight queries load")
   else
-    health.error("highlight queries do not load: " .. tostring(query))
+    health.error("highlight queries do not load: " .. tostring(query), {
+      "The parser and queries may come from different compiler versions. Run :TSUpdate zane.",
+    })
   end
 end
 
